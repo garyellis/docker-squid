@@ -1,0 +1,4 @@
+IMAGE_NAME=garyellis/docker-squid
+IMAGE_VERSION=4.9
+DOCKERFILE=Dockerfile
+REGISTRY=${REGISTRY:-529332856614.dkr.ecr.us-west-2.amazonaws.com}
