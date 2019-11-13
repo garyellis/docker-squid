@@ -2,6 +2,7 @@ data "aws_region" "current" {}
 
 data "aws_caller_identity" "current" {}
 
+#### ecs iam execution and task role configuration
 data "aws_iam_policy_document" "ecs_assume_role" {
   statement {
     actions       = ["sts:AssumeRole"]
@@ -22,6 +23,9 @@ data "aws_iam_policy_document" "ecs_task" {
       "ecr:BatchGetImage",
       "ecr:BatchCheckLayerAvailability",
       "ecr:GetAuthorizationToken",
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents"
     ]
     resources = ["*"]
   }
@@ -55,7 +59,6 @@ data "aws_iam_policy_document" "ecs_task_kms" {
     ]
   }
 }
-
 
 resource "aws_iam_policy" "ecs_task" {
   name_prefix = format("%s-codebuild", var.name)
@@ -94,7 +97,6 @@ resource "aws_ssm_parameter" "squid_witelist" {
   value = " "
 }
 
-
 resource "aws_ssm_parameter" "squid_conf" {
   name  = var.squid_conf_ssm_parameter_name
   type  = "String"
@@ -102,30 +104,105 @@ resource "aws_ssm_parameter" "squid_conf" {
 }
 
 
+#### cloud mapper configuration
+locals {
+  service_discovery_private_dns_namespace_id = var.service_discovery_private_dns_namespace_id == "" ? join("", aws_service_discovery_private_dns_namespace.squid.*.id) : var.service_discovery_private_dns_namespace_id
+}
 
-#### ecs configuration
+resource "aws_service_discovery_private_dns_namespace" "squid" {
+  count = var.create_service_discovery_dns_namespace ? 1 : 0
+
+  name        = var.service_discovery_private_dns_namespace_name
+  description = var.service_discovery_private_dns_namespace_description
+  vpc         = var.service_discovery_private_dns_namespace_vpc_id
+}
+
+resource "aws_service_discovery_service" "squid" {
+  name = var.name
+  dns_config {
+    namespace_id = local.service_discovery_private_dns_namespace_id
+    dns_records {
+      ttl  = 60
+      type = "A"
+    }
+    routing_policy = "MULTIVALUE"
+  }
+}
+
+
+#### ecs task definition and service configuration
+module "ecs" {
+  source  = "terraform-aws-modules/ecs/aws"
+  version = "v2.0.0"
+
+  create_ecs = var.create_ecs_cluster
+  name       = var.ecs_cluster_name
+  tags       = var.tags
+}
+
+locals {
+  container_definition = {
+    name                    = var.name
+    image                   = var.container_def_image
+    essential               = true
+    privileged              = false
+    portMappings            = [{ containerPort = 3128 }]
+    stopTimeout             = 60
+    logConfiguration        = {
+      logDriver = "awslogs"
+      options   = {
+        "awslogs-region"        = data.aws_region.current.name
+        "awslogs-group"         = "ecs/${var.name}"
+        "awslogs-stream-prefix" = var.name
+      }
+    }
+    environment                 = var.container_def_environment
+  }
+  container_definition_json_map = jsonencode(local.container_definition)
+  container_definition_json     = "[${local.container_definition_json_map}]"
+}
+
 resource "aws_ecs_task_definition" "squid" {
-  name    = var.name
+  family                   = var.name
+  execution_role_arn       = aws_iam_role.ecs_task.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+  network_mode             = "awsvpc"
+  cpu                      = 2048
+  memory                   = 4096
+  
+  container_definitions    = local.container_definition_json
+  requires_compatibilities = ["FARGATE"]
 }
 
 data "aws_ecs_task_definition" "squid" {
   task_definition = var.name
-
   depends_on = [aws_ecs_task_definition.squid]
 }
 
 resource "aws_ecs_service" "squid" {
   name            = var.name
-  cluster         = ""
-  task_definition = ""
+  cluster         = module.ecs.this_ecs_cluster_id
+  task_definition = format("%s:%s",
+    aws_ecs_task_definition.squid.family,
+    max(aws_ecs_task_definition.squid.revision, data.aws_ecs_task_definition.squid.revision)
+  )
+
   desired_count   = var.ecs_service_desired_count
   launch_type     = "FARGATE"
   
-
   network_configuration {
-    subnets          = var.subnets
-    security_groups  = 
-    assign_public_ip = var.assign_public_ip
+    subnets          = var.ecs_service_subnets
+    security_groups  = var.ecs_service_security_group_attachments
+    assign_public_ip = var.ecs_service_assign_public_ip
   }
 
+  service_registries {
+    registry_arn = aws_service_discovery_service.squid.arn
+  }
+}
+
+resource "aws_cloudwatch_log_group" "squid" {
+  name              = format("ecs/%s",var.name)
+  retention_in_days = 30
+  tags = var.tags
 }

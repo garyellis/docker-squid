@@ -1,5 +1,6 @@
 #!/bin/bash -e
 
+set -x
 export WHITELIST_FROM_ENV_ENABLED=${WHITELIST_FROM_ENV_ENABLED:-true}
 export WHITELIST_DOMAIN_NAMES="${WHITELIST_DOMAIN_NAMES:-google.com,github.com}"
 
@@ -41,4 +42,4 @@ selfsigned_ca
 whitelist_from_env
 aws_ssm_config
 
-exec "$@"
+exec squid -f /etc/squid/squid.conf -NYCd 1
